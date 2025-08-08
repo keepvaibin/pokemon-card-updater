@@ -1,0 +1,19 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("TIMESCALE_URL")
+}
+
+model PriceHistory {
+  cardId            String
+  time              DateTime
+  averageSellPrice  Float?
+  source            String?
+
+  @@id([cardId, time])
+  @@index([time(sort: Desc)])
+  @@map("PriceHistory")
+}

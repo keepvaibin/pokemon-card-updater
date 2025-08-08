@@ -7,7 +7,7 @@ dotenv.config();
 
 const totalPageCount = async (): Promise<number> => {
   const res = await axios.get("https://api.pokemontcg.io/v2/cards", {
-    headers: { "X-Api-Key": process.env.POKEMON_TCG_API_KEY || "" },
+    headers: { "X-Api-Key": process.env.X_API_KEY_1 || "" },
     params: { page: 1, pageSize: 1 },
     timeout: 180000,
   });
@@ -48,7 +48,7 @@ export async function timerHandler(_: Timer, context: InvocationContext): Promis
 }
 
 app.timer("pokemonCardUpdaterManager", {
-  schedule: "0 0 */6 * * *",
+  schedule: "0 0 */3 * * *",
   handler: timerHandler,
 });
 

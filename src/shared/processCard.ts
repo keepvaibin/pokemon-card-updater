@@ -5,6 +5,25 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 const prisma = new PrismaClient();
+
+const prismaTimescale =
+  process.env.TIMESCALE_URL
+    ? new PrismaClient({ datasources: { db: { url: process.env.TIMESCALE_URL } } })
+    : null;
+
+async function recordPriceEvent(
+  cardId: string,
+  averageSellPrice: number | null | undefined,
+  source = "unknown"
+) {
+  if (!prismaTimescale) return; // skip if not configured
+  const now = new Date();
+
+  return prismaTimescale.priceHistory.create({
+    data: { cardId, time: now, averageSellPrice, source },
+  });
+}
+
 const DEBUG = process.env.DEBUG === "true";
 
 export async function processCard(card: any, context: InvocationContext) {
@@ -195,6 +214,22 @@ export async function processCard(card: any, context: InvocationContext) {
       update: data,
       create: data,
     });
+
+    const cmAvg = card.cardmarket?.prices?.averageSellPrice;
+    const tpMarket =
+      card.tcgplayer?.prices?.normal?.market ??
+      card.tcgplayer?.prices?.holofoil?.market ??
+      card.tcgplayer?.prices?.reverseHolofoil?.market;
+
+    const avgForHistory = cmAvg ?? tpMarket ?? null;
+    const source =
+      cmAvg != null ? "cardmarket" :
+      tpMarket != null ? "tcgplayer" : "unknown";
+
+    if (card.id) {
+      await recordPriceEvent(card.id, avgForHistory, source);
+    }
+    
   } catch (err) {
     context.error(`❌ Failed to process ${card.name} (${card.id}):`, err);
   }

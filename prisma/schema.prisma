@@ -37,6 +37,7 @@ model Card {
   resistances            Resistance[]
   tcgplayer              TcgPlayer?
   weaknesses             Weakness[]
+  PriceHistory           PriceHistory[]
 }
 
 model Attack {
@@ -174,4 +175,17 @@ model ImportMetadata {
   totalCount   Int
   importedAt   DateTime @default(now())
   isFullImport Boolean  @default(false)
+}
+
+model PriceHistory {
+  cardId           String
+  time             DateTime
+  averageSellPrice Float?
+  source           String?
+
+  card Card @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@id([cardId, time])
+  @@index([time(sort: Desc)])
+  @@map("PriceHistory") // <-- maps to your quoted table name
 }
