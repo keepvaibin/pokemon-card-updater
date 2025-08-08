@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Card {
+  id                     String          @id
+  name                   String
+  supertype              String?
+  subtypes               String[]
+  level                  String?
+  hp                     String?
+  types                  String[]
+  evolvesFrom            String?
+  evolvesTo              String[]
+  rules                  String[]
+  flavorText             String?
+  artist                 String?
+  rarity                 String?
+  number                 String
+  nationalPokedexNumbers Int[]
+  setId                  String?
+  retreatCost            String[]
+  convertedRetreatCost   Int?
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+  abilities              Ability[]
+  attacks                Attack[]
+  set                    CardSet?        @relation(fields: [setId], references: [id])
+  images                 CardImages?
+  legalities             CardLegalities?
+  cardmarket             CardMarket?
+  resistances            Resistance[]
+  tcgplayer              TcgPlayer?
+  weaknesses             Weakness[]
+}
+
+model Attack {
+  id                  String   @id @default(uuid())
+  cardId              String
+  name                String
+  cost                String[]
+  convertedEnergyCost Int
+  damage              String?
+  text                String?
+  card                Card     @relation(fields: [cardId], references: [id])
+}
+
+model Ability {
+  id     String @id @default(uuid())
+  cardId String
+  name   String
+  text   String
+  type   String
+  card   Card   @relation(fields: [cardId], references: [id])
+}
+
+model Weakness {
+  id     String @id @default(uuid())
+  cardId String
+  type   String
+  value  String
+  card   Card   @relation(fields: [cardId], references: [id])
+}
+
+model Resistance {
+  id     String @id @default(uuid())
+  cardId String
+  type   String
+  value  String
+  card   Card   @relation(fields: [cardId], references: [id])
+}
+
+model CardLegalities {
+  id        String  @id @default(uuid())
+  cardId    String  @unique
+  unlimited String?
+  standard  String?
+  expanded  String?
+  card      Card    @relation(fields: [cardId], references: [id])
+}
+
+model CardImages {
+  id     String  @id @default(uuid())
+  cardId String  @unique
+  small  String?
+  large  String?
+  card   Card    @relation(fields: [cardId], references: [id])
+}
+
+model CardSet {
+  id           String         @id
+  name         String
+  series       String
+  printedTotal Int?
+  total        Int?
+  ptcgoCode    String?
+  releaseDate  DateTime?
+  updatedAt    DateTime?
+  symbol       String?
+  logo         String?
+  cards        Card[]
+  legalities   SetLegalities?
+}
+
+model SetLegalities {
+  id        String  @id @default(uuid())
+  setId     String  @unique
+  unlimited String?
+  standard  String?
+  expanded  String?
+  set       CardSet @relation(fields: [setId], references: [id])
+}
+
+model TcgPlayer {
+  id        String           @id @default(uuid())
+  cardId    String           @unique
+  url       String?
+  updatedAt DateTime?
+  pricesId  String?          @unique
+  card      Card             @relation(fields: [cardId], references: [id])
+  prices    TcgPlayerPrices? @relation(fields: [pricesId], references: [id])
+}
+
+model TcgPlayerPrices {
+  id                       String     @id @default(uuid())
+  normalLow                Float?
+  normalMid                Float?
+  normalHigh               Float?
+  normalMarket             Float?
+  normalDirectLow          Float?
+  holofoilLow              Float?
+  holofoilMid              Float?
+  holofoilHigh             Float?
+  holofoilMarket           Float?
+  holofoilDirectLow        Float?
+  reverseHolofoilLow       Float?
+  reverseHolofoilMid       Float?
+  reverseHolofoilHigh      Float?
+  reverseHolofoilMarket    Float?
+  reverseHolofoilDirectLow Float?
+  TcgPlayer                TcgPlayer?
+}
+
+model CardMarket {
+  id               String    @id @default(uuid())
+  cardId           String    @unique
+  url              String?
+  updatedAt        DateTime?
+  averageSellPrice Float?
+  lowPrice         Float?
+  trendPrice       Float?
+  germanProLow     Float?
+  suggestedPrice   Float?
+  reverseHoloSell  Float?
+  reverseHoloLow   Float?
+  reverseHoloTrend Float?
+  lowPriceExPlus   Float?
+  avg1             Float?
+  avg7             Float?
+  avg30            Float?
+  reverseHoloAvg1  Float?
+  reverseHoloAvg7  Float?
+  reverseHoloAvg30 Float?
+  card             Card      @relation(fields: [cardId], references: [id])
+}
+
+model ImportMetadata {
+  id           String   @id @default(uuid())
+  totalCount   Int
+  importedAt   DateTime @default(now())
+  isFullImport Boolean  @default(false)
+}

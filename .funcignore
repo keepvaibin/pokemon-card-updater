@@ -1,0 +1,19 @@
+# Ignore dev stuff
+*.ts
+tsconfig.json
+.vscode/
+test/
+tests/
+__tests__/
+.prisma/
+.env
+*.md
+
+# Ignore all node_modules except production ones
+**/node_modules/*
+!**/node_modules/.prisma
+!**/node_modules/@prisma
+!**/node_modules/@types
+
+# Optional: skip Prisma CLI
+**/node_modules/.bin/prisma
