@@ -1,59 +1,48 @@
-import { PrismaClient } from "@prisma/client";
-import { Attack, Ability, Weakness, Resistance } from "./types";
-import { InvocationContext } from "@azure/functions";
+// src/shared/processCard.ts
 import * as dotenv from "dotenv";
-
 dotenv.config();
-const prisma = new PrismaClient();
 
-const prismaTimescale =
-  process.env.TIMESCALE_URL
-    ? new PrismaClient({ datasources: { db: { url: process.env.TIMESCALE_URL } } })
-    : null;
+// TWO generated clients (different outputs)
+import { PrismaClient as AppClient } from "@prisma/app-client";
+import { PrismaClient as TsClient } from "@prisma/ts-client";
+
+import { Attack, Ability, Weakness, Resistance } from "./types";
+
+// Instantiate once and reuse
+const appDb = new AppClient(); // DATABASE_URL (add ?connection_limit=25&pool_timeout=5)
+const tsDb  = process.env.TIMESCALE_URL ? new TsClient() : null; // TIMESCALE_URL
 
 async function recordPriceEvent(
   cardId: string,
   averageSellPrice: number | null | undefined,
   source = "unknown"
 ) {
-  if (!prismaTimescale) return; // skip if not configured
+  if (!tsDb) return;
   const now = new Date();
-
-  return prismaTimescale.priceHistory.create({
+  return tsDb.priceHistory.create({
     data: { cardId, time: now, averageSellPrice, source },
   });
 }
 
-const DEBUG = process.env.DEBUG === "true";
-
-export async function processCard(card: any, context: InvocationContext) {
+export async function processCard(card: any): Promise<void> {
   try {
-    const existingCard = await prisma.card.findUnique({
-      where: { id: card.id },
-    });
+    // console.log(`🃏 Processing card: ${card?.name ?? "Unknown"} (ID: ${card?.id ?? "no-id"})`);
+    const maxRetries = 3;
+    const delayMs = 1000;
 
-    // If you want to replace always, skip the timestamp check:
-    // Remove the block that skips update if newer
-
-    if (existingCard) {
-      // Delete all related child records first
-      await Promise.all([
-        prisma.attack.deleteMany({ where: { cardId: card.id } }),
-        prisma.ability.deleteMany({ where: { cardId: card.id } }),
-        prisma.weakness.deleteMany({ where: { cardId: card.id } }),
-        prisma.resistance.deleteMany({ where: { cardId: card.id } }),
-        prisma.cardLegalities.deleteMany({ where: { cardId: card.id } }),
-        prisma.cardImages.deleteMany({ where: { cardId: card.id } }),
-        prisma.tcgPlayerPrices.deleteMany({
-          where: { TcgPlayer: { cardId: card.id } },
-        }),
-        prisma.tcgPlayer.deleteMany({ where: { cardId: card.id } }),
-        prisma.cardMarket.deleteMany({ where: { cardId: card.id } }),
-      ]);
+    let existingCard: any = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        existingCard = await appDb.card.findUnique({ where: { id: card.id } });
+        break;
+      } catch (err: any) {
+        console.log(`⚠️ Retry ${attempt}/${maxRetries} findUnique ${card.id}: ${err.message}`);
+        if (attempt === maxRetries) throw err;
+        await new Promise(res => setTimeout(res, delayMs * attempt));
+      }
     }
 
-    //context.log(`🔄 Processing ${card.name} (${card.id})`);
-
+    // Build nested payload
     const data = {
       id: card.id,
       name: card.name,
@@ -101,7 +90,10 @@ export async function processCard(card: any, context: InvocationContext) {
                 total: card.set.total,
                 ptcgoCode: card.set.ptcgoCode,
                 releaseDate: new Date(card.set.releaseDate),
-                updatedAt: card.set.updatedAt && !isNaN(Date.parse(card.set.updatedAt)) ? new Date(card.set.updatedAt) : new Date('1970-01-01'),
+                updatedAt:
+                  card.set.updatedAt && !isNaN(Date.parse(card.set.updatedAt))
+                    ? new Date(card.set.updatedAt)
+                    : new Date("1970-01-01"),
                 symbol: card.set.images?.symbol,
                 logo: card.set.images?.logo,
                 legalities: card.set.legalities
@@ -138,7 +130,7 @@ export async function processCard(card: any, context: InvocationContext) {
                   reverseHolofoilMid: card.tcgplayer.prices?.reverseHolofoil?.mid,
                   reverseHolofoilHigh: card.tcgplayer.prices?.reverseHolofoil?.high,
                   reverseHolofoilMarket: card.tcgplayer.prices?.reverseHolofoil?.market,
-                  reverseHolofoilDirectLow: card.tcgplayer.prices?.revnerseHolofoil?.directLow,
+                  reverseHolofoilDirectLow: card.tcgplayer.prices?.reverseHolofoil?.directLow,
                 },
               },
             },
@@ -178,7 +170,6 @@ export async function processCard(card: any, context: InvocationContext) {
             })),
           }
         : undefined,
-
       abilities: card.abilities?.length
         ? {
             create: card.abilities.map((ability: Ability) => ({
@@ -188,7 +179,6 @@ export async function processCard(card: any, context: InvocationContext) {
             })),
           }
         : undefined,
-
       weaknesses: card.weaknesses?.length
         ? {
             create: card.weaknesses.map((weakness: Weakness) => ({
@@ -197,7 +187,6 @@ export async function processCard(card: any, context: InvocationContext) {
             })),
           }
         : undefined,
-
       resistances: card.resistances?.length
         ? {
             create: card.resistances.map((resistance: Resistance) => ({
@@ -208,13 +197,64 @@ export async function processCard(card: any, context: InvocationContext) {
         : undefined,
     };
 
-    // Upsert: update if exists, else create
-    await prisma.card.upsert({
-      where: { id: card.id },
-      update: data,
-      create: data,
-    });
+    // Optional optimization: use one transaction per card (uncomment if desired)
+    // await appDb.$transaction(async (tx) => {
+    //   if (existingCard) {
+    //     await Promise.all([
+    //       tx.attack.deleteMany({ where: { cardId: card.id } }),
+    //       tx.ability.deleteMany({ where: { cardId: card.id } }),
+    //       tx.weakness.deleteMany({ where: { cardId: card.id } }),
+    //       tx.resistance.deleteMany({ where: { cardId: card.id } }),
+    //       tx.cardLegalities.deleteMany({ where: { cardId: card.id } }),
+    //       tx.cardImages.deleteMany({ where: { cardId: card.id } }),
+    //       tx.tcgPlayerPrices.deleteMany({ where: { TcgPlayer: { cardId: card.id } } }),
+    //       tx.tcgPlayer.deleteMany({ where: { cardId: card.id } }),
+    //       tx.cardMarket.deleteMany({ where: { cardId: card.id } }),
+    //     ]);
+    //   }
+    //   await tx.card.upsert({ where: { id: card.id }, update: data, create: data });
+    // });
 
+    // Current behavior: keep your two-phase approach with retries
+    if (existingCard) {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          await Promise.all([
+            appDb.attack.deleteMany({ where: { cardId: card.id } }),
+            appDb.ability.deleteMany({ where: { cardId: card.id } }),
+            appDb.weakness.deleteMany({ where: { cardId: card.id } }),
+            appDb.resistance.deleteMany({ where: { cardId: card.id } }),
+            appDb.cardLegalities.deleteMany({ where: { cardId: card.id } }),
+            appDb.cardImages.deleteMany({ where: { cardId: card.id } }),
+            appDb.tcgPlayerPrices.deleteMany({ where: { TcgPlayer: { cardId: card.id } } }),
+            appDb.tcgPlayer.deleteMany({ where: { cardId: card.id } }),
+            appDb.cardMarket.deleteMany({ where: { cardId: card.id } }),
+          ]);
+          break;
+        } catch (err: any) {
+          console.log(`⚠️ Retry ${attempt}/${maxRetries} delete related ${card.id}: ${err.message}`);
+          if (attempt === maxRetries) throw err;
+          await new Promise(res => setTimeout(res, delayMs * attempt));
+        }
+      }
+    }
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await appDb.card.upsert({
+          where: { id: card.id },
+          update: data,
+          create: data,
+        });
+        break;
+      } catch (err: any) {
+        console.log(`⚠️ Retry ${attempt}/${maxRetries} upsert ${card.id}: ${err.message}`);
+        if (attempt === maxRetries) throw err;
+        await new Promise(res => setTimeout(res, delayMs * attempt));
+      }
+    }
+
+    // Timescale history
     const cmAvg = card.cardmarket?.prices?.averageSellPrice;
     const tpMarket =
       card.tcgplayer?.prices?.normal?.market ??
@@ -226,11 +266,17 @@ export async function processCard(card: any, context: InvocationContext) {
       cmAvg != null ? "cardmarket" :
       tpMarket != null ? "tcgplayer" : "unknown";
 
-    if (card.id) {
-      await recordPriceEvent(card.id, avgForHistory, source);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        if (card.id) await recordPriceEvent(card.id, avgForHistory, source);
+        break;
+      } catch (err: any) {
+        console.log(`⚠️ Retry ${attempt}/${maxRetries} PriceHistory ${card.id}: ${err.message}`);
+        if (attempt === maxRetries) throw err;
+        await new Promise(res => setTimeout(res, delayMs * attempt));
+      }
     }
-    
-  } catch (err) {
-    context.error(`❌ Failed to process ${card.name} (${card.id}):`, err);
+  } catch (err: any) {
+    console.error(`❌ Failed to process ${card?.name} (${card?.id}): ${err.message ?? err}`);
   }
 }

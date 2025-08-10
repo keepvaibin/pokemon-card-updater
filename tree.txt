@@ -1,0 +1,84 @@
+.
+├── cards-full.json
+├── checkImportMetadata.ts
+├── dist
+│   ├── functions
+│   │   ├── pokemon-card-updater-manager
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker1
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker2
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker3
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker4
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker5
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker6
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker7
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker8
+│   │   │   └── index.js
+│   │   ├── pokemon-card-updater-worker9
+│   │   │   └── index.js
+│   │   └── price-history-rollup
+│   │       └── index.js
+│   ├── scripts
+│   │   └── manualPriceHistoryRollup.js
+│   └── shared
+│       ├── db.js
+│       ├── fetchCards.js
+│       ├── processCard.js
+│       ├── syncCards.js
+│       └── types.js
+├── host.json
+├── local.settings.json
+├── package-lock.json
+├── package.json
+├── prisma
+│   ├── migrations
+│   │   ├── 20250806233051_init
+│   │   │   └── migration.sql
+│   │   ├── 20250807001724_add_is_full_import
+│   │   │   └── migration.sql
+│   │   └── migration_lock.toml
+│   ├── schema.prisma
+│   └── schema.timescale.prisma
+├── src
+│   ├── functions
+│   │   ├── pokemon-card-updater-manager
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker1
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker2
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker3
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker4
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker5
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker6
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker7
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker8
+│   │   │   └── index.ts
+│   │   ├── pokemon-card-updater-worker9
+│   │   │   └── index.ts
+│   │   └── price-history-rollup
+│   │       └── index.ts
+│   ├── scripts
+│   │   └── manualPriceHistoryRollup.ts
+│   └── shared
+│       ├── db.ts
+│       ├── fetchCards.ts
+│       ├── processCard.ts
+│       ├── syncCards.ts
+│       └── types.ts
+├── tree.txt
+└── tsconfig.json
+
+35 directories, 47 files
