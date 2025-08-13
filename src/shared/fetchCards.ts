@@ -1,61 +1,29 @@
 // src/shared/fetchCards.ts
 import axios from "axios";
-import * as dotenv from "dotenv";
-import { writeFileSync } from "fs";
-import path from "path";
 
-dotenv.config();
+export async function fetchPage(
+  _opts: Record<string, unknown>,
+  page: number,
+  apiKey: string
+): Promise<any> {
+  const url = "https://api.pokemontcg.io/v2/cards";
+  const max = 3;
+  let delay = 500;
 
-const baseUrl = "https://api.pokemontcg.io/v2/cards";
-const pageSize = 250;
-const maxRetries = 30;
-const timeout = 200000;
-
-function toQueryString(params: Record<string, any>): string {
-  return Object.entries(params)
-    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
-    .join("&");
-}
-
-export async function fetchPage(params: any, page: number, apikey: string): Promise<any> {
-  const headers = { "X-API-KEY": apikey };
-  const fullParams = { ...params, page, pageSize };
-  const url = `${baseUrl}?${toQueryString(fullParams)}`;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; attempt <= max; attempt++) {
     try {
-      console.log(`🌐 Requesting page ${page} (attempt ${attempt}): ${url}`);
-      const res = await axios.get(baseUrl, { headers, timeout, params: fullParams });
-      return res.data; // { data: Card[]; ... }
+      console.log(`🌐 Requesting page ${page} (attempt ${attempt}): ${url}?page=${page}&pageSize=250`);
+      const res = await axios.get(url, {
+        headers: { "X-Api-Key": apiKey },
+        params: { page, pageSize: 250 },
+        timeout: 180_000,
+      });
+      return res.data;
     } catch (err: any) {
-      console.warn(`⚠️ Retry ${attempt}/${maxRetries} failed for page ${page}: ${err.message}`);
-      if (attempt === maxRetries) throw err;
-      await new Promise(res => setTimeout(res, 1000 * attempt));
+      if (attempt === max) throw err;
+      await new Promise((r) => setTimeout(r, delay));
+      delay *= 2;
     }
   }
-}
-
-export async function fetchCardRange(
-  startPage: number,
-  endPage: number,
-  apikey: string,
-  saveToFile = false
-): Promise<{ cards: any[] }> {
-  if (startPage < 1 || endPage < startPage) throw new Error("Invalid page range");
-  const allCards: any[] = [];
-
-  for (let page = startPage; page <= endPage; page++) {
-    const data = await fetchPage({}, page, apikey);
-    const { data: cards } = data;
-    console.log(`📦 Fetched page ${page} with ${cards.length} cards`);
-    allCards.push(...cards);
-  }
-
-  if (saveToFile) {
-    const outputPath = path.resolve(`./cards-page-${startPage}-to-${endPage}.json`);
-    writeFileSync(outputPath, JSON.stringify(allCards, null, 2));
-    console.log(`💾 Saved cards to ${outputPath}`);
-  }
-
-  return { cards: allCards };
+  throw new Error("unreachable");
 }

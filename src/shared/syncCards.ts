@@ -1,57 +1,55 @@
 // src/shared/syncCards.ts
 import { fetchPage } from "./fetchCards";
-import { processCard } from "./processCard";
-import { pageProcessingQueue } from "./pageQueue";
+import { processPage } from "./processCard";
+import { getWorkerQueue } from "./queueRegistry";
 
-type SyncResult = {
-  success: true;
-  totalCards: number;
-  pageStart: number;
-  pageEnd: number;
-};
+type SyncResult = { success: true; totalCards: number; pageStart: number; pageEnd: number };
 
-// FIRE-AND-FORGET: returns immediately after enqueuing page jobs
 export async function syncCardsForPages(
+  workerId: string,
   startPage: number,
   endPage: number,
-  _context: unknown,         // not used (no context.log)
-  apikey: string
+  apikey = process.env.POKEMON_TCG_API_KEY as string
 ): Promise<SyncResult> {
-  if (startPage < 1 || endPage < startPage) {
-    throw new Error(`Invalid page range: ${startPage} to ${endPage}`);
+  if (!workerId) throw new Error("syncCardsForPages: workerId is required");
+  if (!apikey) throw new Error("Missing POKEMON_TCG_API_KEY");
+  if (!Number.isFinite(startPage) || !Number.isFinite(endPage) || startPage < 1 || endPage < startPage) {
+    throw new Error(`Invalid page range: ${startPage}–${endPage}`);
   }
-  if (!apikey) throw new Error("X_API_KEY env var is not set");
 
-  console.log(`⬇️ Sync (fire-and-forget) pages ${startPage} → ${endPage}`);
-
+  const queue = getWorkerQueue(workerId);
+  const jobs: Promise<any>[] = [];
   let totalCards = 0;
 
+  console.log(`🧪 [${workerId}] Fetching pages ${startPage}–${endPage} (combined queue)`);
+
   for (let page = startPage; page <= endPage; page++) {
-    // Fetch page
-    const data = await fetchPage({}, page, apikey);
-    const { data: cards } = data;
-    totalCards += cards.length;
-    console.log(`📦 Fetched page ${page} with ${cards.length} cards`);
+    try {
+      console.log(`🧩 [${workerId}] Fetch page ${page}...`);
+      const data = await fetchPage({}, page, apikey);
+      const cards = data?.data ?? data?.cards ?? [];
+      totalCards += cards.length;
+      console.log(`📦 [${workerId}] Page ${page}: ${cards.length} cards fetched`);
 
-    // Enqueue page job (do not await). Queue runs up to 25 pages concurrently.
-    void pageProcessingQueue.push(async () => {
-      try {
-        console.log(`🧩 Processing page ${page}...`);
-        for (const card of cards) {
-          // Keep one-card-at-a-time behavior
-          await processCard(card);
+      const job = queue.push(async () => {
+        try {
+          console.log(`⚙️  [${workerId}] Process page ${page} (app txn + TS batch)`);
+          await processPage(cards, workerId);
+          console.log(`✅ [${workerId}] Done page ${page}`);
+        } catch (err: any) {
+          console.error(`❌ [${workerId}] Page ${page} failed: ${err?.message ?? err}`);
+        } finally {
+          (cards as any[]).length = 0;
         }
-        // Help GC: drop large array reference
-        (cards as any[]).length = 0;
-        console.log(`✅ Done page ${page}`);
-      } catch (e) {
-        console.error(`❌ Page ${page} processing failed`, e);
-      }
-    });
+      });
 
-    // Immediately continue to fetch next page
+      jobs.push(job);
+    } catch (err: any) {
+      console.error(`❌ [${workerId}] Fetch page ${page} failed: ${err?.message ?? err}`);
+    }
   }
 
-  console.log(`ℹ️ Enqueued all page jobs for ${startPage}–${endPage}; returning 202-style.`);
+  await Promise.allSettled(jobs);
+  console.log(`🎉 [${workerId}] Finished pages ${startPage}–${endPage}`);
   return { success: true, totalCards, pageStart: startPage, pageEnd: endPage };
 }
