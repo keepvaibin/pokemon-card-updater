@@ -1,0 +1,20 @@
+[Unit]
+Description=Azure Functions Host for Pokemon Card Updater (Core Tools)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/USER/pokemon-card-updater
+# Use npm run start to build + start, or call func directly if you prebuild
+ExecStart=/usr/bin/env bash -lc 'npm run start'
+# If you prefer direct func:
+# ExecStart=/usr/bin/env func start --script-root dist
+EnvironmentFile=/home/USER/pokemon-card-updater/.env
+Restart=always
+RestartSec=5
+User=USER
+Group=USER
+
+[Install]
+WantedBy=multi-user.target

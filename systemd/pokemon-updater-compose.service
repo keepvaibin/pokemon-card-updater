@@ -1,0 +1,18 @@
+[Unit]
+Description=Pokemon Card Updater (Docker Compose: app + Azurite)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/USER/pokemon-card-updater
+ExecStart=/usr/bin/env bash -lc 'docker compose up -d --build'
+ExecStop=/usr/bin/env bash -lc 'docker compose down'
+TimeoutStartSec=0
+User=USER
+Group=USER
+
+[Install]
+WantedBy=multi-user.target
