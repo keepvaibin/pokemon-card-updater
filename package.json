@@ -9,11 +9,14 @@
     "prestart": "npm run clean && npm run build",
     "start": "func start",
     "postinstall": "npx prisma generate",
-    "test": "echo \"No tests yet...\""
+    "test": "echo \"No tests yet...\"",
+    "prisma:generate": "npm run prisma:generate:timescale && npm run prisma:generate:main",
+    "prisma:generate:timescale": "prisma generate --schema=./prisma/schema.timescale.prisma",
+    "prisma:generate:main": "prisma generate --schema=./prisma/schema.prisma"
   },
   "dependencies": {
     "@azure/functions": "^4.7.2",
-    "@prisma/client": "^6.13.0",
+    "@prisma/client": "^6.14.0",
     "axios": "^1.11.0",
     "dotenv": "^17.2.1",
     "node-fetch": "^3.3.2"
@@ -21,7 +24,7 @@
   "devDependencies": {
     "@types/node": "^20.19.9",
     "@types/node-fetch": "^2.6.13",
-    "prisma": "^6.13.0",
+    "prisma": "^6.14.0",
     "rimraf": "^5.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2"
