@@ -9,12 +9,13 @@ datasource db {
 }
 
 model PriceHistory {
-  cardId            String
-  time              DateTime
-  averageSellPrice  Float?
-  source            String?
+  cardId                            String
+  time                              DateTime
+  tcgplayer_normal_market           Float?
+  tcgplayer_holofoil_market         Float?
+  tcgplayer_reverse_holofoil_market Float?
+  cardmarket_average_sell_price     Float?
+  no_tcgplayer_prices               Boolean
 
   @@id([cardId, time])
-  @@index([time(sort: Desc)])
-  @@map("PriceHistory")
 }

@@ -1,230 +1,214 @@
-// src/functions/price-history-rollup/index.ts
 import { app, InvocationContext, Timer } from "@azure/functions";
 import * as dotenv from "dotenv";
 import { PrismaClient as TsClient } from "@prisma/ts-client";
 
 dotenv.config();
 
-// --- Prisma client pointed ONLY at Timescale (price_tracking) ---
+// -------- Config (tunable) --------
+const DAILY_KEEP_DAYS   = Number(process.env.ROLLUP_DAYS   ?? 7);    // last N full days (excl. today)
+const WEEKLY_KEEP_WEEKS = Number(process.env.ROLLUP_WEEKS  ?? 4);    // last N full ISO weeks (excl. current)
+const MONTHLY_KEEP_MO   = Number(process.env.ROLLUP_MONTHS ?? 12);   // last N full months (excl. current)
+const DELETE_BATCH      = Number(process.env.ROLLUP_DELETE_BATCH ?? 20000); // rows per batch
+// Optional: delete everything older than last N full years (excl. current year).
+// If unset or invalid, terminal retention is skipped and yearly rows persist.
+const RETAIN_YEARS      = process.env.RETAIN_YEARS != null
+  ? Number(process.env.RETAIN_YEARS)
+  : NaN;
+
 const prismaTimescale = new TsClient();
 
-// --- Small retry helper (exponential backoff + jitter) ---
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function withRetries<T>(
-  fn: () => Promise<T>,
-  label: string,
-  retries = 4,
-  baseDelayMs = 500
-): Promise<T> {
+async function withRetries<T>(fn: () => Promise<T>, label: string, retries = 4, baseDelayMs = 500): Promise<T> {
   let lastErr: any;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err: any) {
+    try { return await fn(); } catch (err: any) {
       lastErr = err;
       if (attempt === retries) break;
       const delay = Math.round(baseDelayMs * Math.pow(2, attempt) * (0.5 + Math.random()));
-      console.warn(
-        `[rollup] ${label} failed (attempt ${attempt + 1}/${retries + 1}). Retry in ${delay}ms:`,
-        err?.message ?? err
-      );
+      console.warn(`[rollup] ${label} failed (attempt ${attempt + 1}/${retries + 1}). Retry in ${delay}ms:`, err?.message ?? err);
       await sleep(delay);
     }
   }
   throw lastErr;
 }
 
-// --- DDL: create rollup tables + indexes ---
-const CREATE_TABLE_DAILY = `
-  CREATE TABLE IF NOT EXISTS price_history_daily (
-    "cardId" TEXT NOT NULL,
-    bucket   TIMESTAMPTZ NOT NULL,
-    last_price DOUBLE PRECISION,
-    PRIMARY KEY ("cardId", bucket)
-  );
-`;
-const CREATE_TABLE_3D = `
-  CREATE TABLE IF NOT EXISTS price_history_3d (
-    "cardId" TEXT NOT NULL,
-    bucket   TIMESTAMPTZ NOT NULL,
-    last_price DOUBLE PRECISION,
-    PRIMARY KEY ("cardId", bucket)
-  );
-`;
-const CREATE_TABLE_MONTHLY = `
-  CREATE TABLE IF NOT EXISTS price_history_monthly (
-    "cardId" TEXT NOT NULL,
-    bucket   TIMESTAMPTZ NOT NULL,
-    last_price DOUBLE PRECISION,
-    PRIMARY KEY ("cardId", bucket)
-  );
-`;
-const CREATE_TABLE_6M = `
-  CREATE TABLE IF NOT EXISTS price_history_6m (
-    "cardId" TEXT NOT NULL,
-    bucket   TIMESTAMPTZ NOT NULL,
-    last_price DOUBLE PRECISION,
-    PRIMARY KEY ("cardId", bucket)
-  );
-`;
-
-const CREATE_INDEXES = [
-  `CREATE INDEX IF NOT EXISTS phd_bucket_idx  ON price_history_daily (bucket);`,
-  `CREATE INDEX IF NOT EXISTS ph3d_bucket_idx ON price_history_3d (bucket);`,
-  `CREATE INDEX IF NOT EXISTS phm_bucket_idx  ON price_history_monthly (bucket);`,
-  `CREATE INDEX IF NOT EXISTS ph6m_bucket_idx ON price_history_6m (bucket);`,
+// Helpful indexes (idempotent; no schema change)
+const OPTIMIZATION_STATEMENTS = [
+  `CREATE INDEX IF NOT EXISTS idx_pricehistory_cardid_time
+     ON "PriceHistory" ("cardId", "time" DESC);`,
+  `CREATE INDEX IF NOT EXISTS idx_pricehistory_time
+     ON "PriceHistory" ("time" DESC);`,
 ];
 
-// --- UPSERT rollups (window function for last-in-bucket). Ignores NULL prices. ---
-const UPSERT_DAILY = `
-  INSERT INTO price_history_daily ("cardId", bucket, last_price)
-  SELECT "cardId", bucket, "averageSellPrice"
-  FROM (
-    WITH base AS (
-      SELECT "cardId",
-             time_bucket('1 day', "time") AS bucket,
-             "time", "averageSellPrice"
-      FROM "PriceHistory"
-      WHERE "time" >= now() - interval '35 days'
-        AND "averageSellPrice" IS NOT NULL
-    ),
-    ranked AS (
-      SELECT "cardId", bucket, "averageSellPrice",
-             ROW_NUMBER() OVER (PARTITION BY "cardId", bucket ORDER BY "time" DESC) rn
-      FROM base
-    )
-    SELECT "cardId", bucket, "averageSellPrice" FROM ranked WHERE rn = 1
-  ) s
-  ON CONFLICT ("cardId", bucket) DO UPDATE
-  SET last_price = EXCLUDED.last_price;
-`;
+// Singleton lock
+const ACQUIRE_LOCK_SQL = `SELECT pg_try_advisory_lock(hashtextextended('pricehistory_rollup', 0)) AS locked;`;
+const RELEASE_LOCK_SQL = `SELECT pg_advisory_unlock(hashtextextended('pricehistory_rollup', 0));`;
 
-const UPSERT_3D = `
-  INSERT INTO price_history_3d ("cardId", bucket, last_price)
-  SELECT "cardId", bucket, "averageSellPrice"
-  FROM (
-    WITH base AS (
-      SELECT "cardId",
-             time_bucket('3 days', "time") AS bucket,
-             "time", "averageSellPrice"
-      FROM "PriceHistory"
-      WHERE "time" >= now() - interval '110 days'
-        AND "averageSellPrice" IS NOT NULL
-    ),
-    ranked AS (
-      SELECT "cardId", bucket, "averageSellPrice",
-             ROW_NUMBER() OVER (PARTITION BY "cardId", bucket ORDER BY "time" DESC) rn
-      FROM base
-    )
-    SELECT "cardId", bucket, "averageSellPrice" FROM ranked WHERE rn = 1
-  ) s
-  ON CONFLICT ("cardId", bucket) DO UPDATE
-  SET last_price = EXCLUDED.last_price;
-`;
+// Batched delete runner
+async function deleteInBatches(sqlProducer: () => string, label: string) {
+  let total = 0;
+  while (true) {
+    const sql = sqlProducer();
+    const deleted: number = await withRetries(
+      () => prismaTimescale.$executeRawUnsafe(sql),
+      `${label}_batch`
+    );
+    total += deleted;
+    if (!deleted || deleted < DELETE_BATCH) break;
+  }
+  console.log(`[rollup] ${label}: deleted ${total} rows`);
+}
 
-const UPSERT_MONTHLY = `
-  INSERT INTO price_history_monthly ("cardId", bucket, last_price)
-  SELECT "cardId", bucket, "averageSellPrice"
-  FROM (
-    WITH base AS (
-      SELECT "cardId",
-             date_trunc('month', "time") AS bucket,
-             "time", "averageSellPrice"
-      FROM "PriceHistory"
-      WHERE "time" >= now() - interval '4 years'
-        AND "averageSellPrice" IS NOT NULL
-    ),
-    ranked AS (
-      SELECT "cardId", bucket, "averageSellPrice",
-             ROW_NUMBER() OVER (PARTITION BY "cardId", bucket ORDER BY "time" DESC) rn
-      FROM base
-    )
-    SELECT "cardId", bucket, "averageSellPrice" FROM ranked WHERE rn = 1
-  ) s
-  ON CONFLICT ("cardId", bucket) DO UPDATE
-  SET last_price = EXCLUDED.last_price;
-`;
+// Build SQL with a single time snapshot (no drift across midnight)
+function buildSQL(nowIso: string) {
+  const NOW = `'${nowIso}'::timestamptz`;
 
-const UPSERT_6M = `
-  INSERT INTO price_history_6m ("cardId", bucket, last_price)
-  SELECT "cardId", bucket, "averageSellPrice"
-  FROM (
-    WITH base AS (
-      SELECT "cardId",
-             time_bucket('6 months', "time") AS bucket,
-             "time", "averageSellPrice"
+  // DAILY: keep latest per day in last N full days (excl. today)
+  const sqlDailyBatch = () => `
+  WITH doomed AS (
+    SELECT ctid FROM (
+      SELECT ctid, ROW_NUMBER() OVER (
+        PARTITION BY "cardId", date_trunc('day', "time")
+        ORDER BY "time" DESC
+      ) rn
       FROM "PriceHistory"
-      WHERE "averageSellPrice" IS NOT NULL
-    ),
-    ranked AS (
-      SELECT "cardId", bucket, "averageSellPrice",
-             ROW_NUMBER() OVER (PARTITION BY "cardId", bucket ORDER BY "time" DESC) rn
-      FROM base
-    )
-    SELECT "cardId", bucket, "averageSellPrice" FROM ranked WHERE rn = 1
-  ) s
-  ON CONFLICT ("cardId", bucket) DO UPDATE
-  SET last_price = EXCLUDED.last_price;
-`;
+      WHERE "time" >= (date_trunc('day', ${NOW}) - INTERVAL '${DAILY_KEEP_DAYS} days')
+        AND "time"  <  date_trunc('day', ${NOW})
+    ) s
+    WHERE rn > 1
+    LIMIT ${DELETE_BATCH}
+  )
+  DELETE FROM "PriceHistory" WHERE ctid IN (SELECT ctid FROM doomed);`;
 
-// --- PRUNE (run AFTER rollups). Monthly & 6m kept forever. ---
-const PRUNE_STATEMENTS = [
-  `DELETE FROM "PriceHistory" WHERE "time" < now() - interval '48 hours';`,
-  `DELETE FROM price_history_daily   WHERE bucket < date_trunc('day',   now()) - interval '30 days';`,
-  `DELETE FROM price_history_3d      WHERE bucket < date_trunc('day',   now()) - interval '90 days';`,
-];
+  // WEEKLY: keep latest per ISO week in last N full weeks (excl. current),
+  // but do NOT touch rows inside the last DAILY window (protected).
+  const sqlWeeklyBatch = () => `
+  WITH doomed AS (
+    SELECT ctid FROM (
+      SELECT ctid, ROW_NUMBER() OVER (
+        PARTITION BY "cardId", date_trunc('week', "time")
+        ORDER BY "time" DESC
+      ) rn
+      FROM "PriceHistory"
+      WHERE "time" >= (date_trunc('week', ${NOW}) - INTERVAL '${WEEKLY_KEEP_WEEKS} weeks')
+        AND "time"  <  date_trunc('week', ${NOW})
+        AND "time"  <  (date_trunc('day', ${NOW}) - INTERVAL '${DAILY_KEEP_DAYS} days')
+    ) s
+    WHERE rn > 1
+    LIMIT ${DELETE_BATCH}
+  )
+  DELETE FROM "PriceHistory" WHERE ctid IN (SELECT ctid FROM doomed);`;
+
+  // MONTHLY: keep latest per month in last N full months (excl. current),
+  // but do NOT touch rows inside the last WEEKLY window (protected).
+  const sqlMonthlyBatch = () => `
+  WITH doomed AS (
+    SELECT ctid FROM (
+      SELECT ctid, ROW_NUMBER() OVER (
+        PARTITION BY "cardId", date_trunc('month', "time")
+        ORDER BY "time" DESC
+      ) rn
+      FROM "PriceHistory"
+      WHERE "time" >= (date_trunc('month', ${NOW}) - INTERVAL '${MONTHLY_KEEP_MO} months')
+        AND "time"  <  date_trunc('month', ${NOW})
+        AND "time"  <  (date_trunc('week', ${NOW}) - INTERVAL '${WEEKLY_KEEP_WEEKS} weeks')
+    ) s
+    WHERE rn > 1
+    LIMIT ${DELETE_BATCH}
+  )
+  DELETE FROM "PriceHistory" WHERE ctid IN (SELECT ctid FROM doomed);`;
+
+  // YEARLY: beyond the monthly window, keep latest per year
+  const sqlYearlyBatch = () => `
+  WITH doomed AS (
+    SELECT ctid FROM (
+      SELECT ctid, ROW_NUMBER() OVER (
+        PARTITION BY "cardId", date_trunc('year', "time")
+        ORDER BY "time" DESC
+      ) rn
+      FROM "PriceHistory"
+      WHERE "time" < (date_trunc('month', ${NOW}) - INTERVAL '${MONTHLY_KEEP_MO} months')
+    ) s
+    WHERE rn > 1
+    LIMIT ${DELETE_BATCH}
+  )
+  DELETE FROM "PriceHistory" WHERE ctid IN (SELECT ctid FROM doomed);`;
+
+  // TERMINAL RETENTION: hard delete anything older than last RETAIN_YEARS full years (optional)
+  // e.g., RETAIN_YEARS=5 on 2025-08-14 keeps >= 2020-01-01, deletes < 2020-01-01.
+  const sqlTerminalRetentionBatch = (retainYears: number) => `
+  WITH doomed AS (
+    SELECT ctid
+    FROM "PriceHistory"
+    WHERE "time" < (date_trunc('year', ${NOW}) - INTERVAL '${retainYears} years')
+    LIMIT ${DELETE_BATCH}
+  )
+  DELETE FROM "PriceHistory" WHERE ctid IN (SELECT ctid FROM doomed);`;
+
+  return { sqlDailyBatch, sqlWeeklyBatch, sqlMonthlyBatch, sqlYearlyBatch, sqlTerminalRetentionBatch };
+}
+
+async function setSessionTimeouts() {
+  // Important: run as SEPARATE statements; Prisma/Postgres disallow multi-statement prepared queries.
+  await withRetries(() => prismaTimescale.$executeRawUnsafe(`SET statement_timeout = '15min'`), "SET statement_timeout");
+  await withRetries(() => prismaTimescale.$executeRawUnsafe(`SET lock_timeout = '5s'`), "SET lock_timeout");
+}
 
 export async function runRollups(context: InvocationContext) {
   console.log("[rollup] start");
-  console.log(`[rollup] Using TIMESCALE_URL: ${process.env.TIMESCALE_URL}`);
 
   if (!process.env.TIMESCALE_URL) {
     context.error("[rollup] No TIMESCALE_URL found in environment!");
     throw new Error("TIMESCALE_URL is required");
   }
 
-  console.log("[rollup] Sanity ping...");
-  await withRetries(
-    () => prismaTimescale.$executeRawUnsafe(`SELECT 1;`),
-    "sanity SELECT 1"
+  // Optional: explicitly connect (safe to call even if already connected)
+  await prismaTimescale.$connect().catch(() => {});
+
+  // Safety timeouts (split into two single statements)
+  await setSessionTimeouts();
+
+  // Sanity ping (use queryRaw for SELECT)
+  console.log("[rollup] sanity ping...");
+  await withRetries(() => prismaTimescale.$queryRawUnsafe(`SELECT 1`), "sanity SELECT 1");
+  console.log("[rollup] sanity ping successful.");
+
+  // Ensure helpful indexes
+  console.log("[rollup] ensuring indexes...");
+  for (const stmt of OPTIMIZATION_STATEMENTS) {
+    await withRetries(() => prismaTimescale.$executeRawUnsafe(stmt), "ensure_index");
+  }
+  console.log("[rollup] indexes ensured.");
+
+  // Acquire advisory lock (singleton)
+  const lockRows = await withRetries(
+    () => prismaTimescale.$queryRawUnsafe<{ locked: boolean }[]>(ACQUIRE_LOCK_SQL),
+    "acquire_lock"
   );
-  console.log("[rollup] Sanity ping successful.");
+  const locked = !!lockRows?.[0]?.locked;
+  if (!locked) { console.warn("[rollup] another rollup is running, exiting."); return; }
 
-  // 1) Ensure tables & indexes exist
-  console.log("[rollup] Creating/ensuring rollup tables...");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(CREATE_TABLE_DAILY),   "CREATE_TABLE_DAILY");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(CREATE_TABLE_3D),      "CREATE_TABLE_3D");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(CREATE_TABLE_MONTHLY), "CREATE_TABLE_MONTHLY");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(CREATE_TABLE_6M),      "CREATE_TABLE_6M");
+  try {
+    // Fixed snapshot for this run
+    const nowIso = new Date().toISOString();
+    const { sqlDailyBatch, sqlWeeklyBatch, sqlMonthlyBatch, sqlYearlyBatch, sqlTerminalRetentionBatch } = buildSQL(nowIso);
 
-  for (const [i, stmt] of CREATE_INDEXES.entries()) {
-    console.log(`[rollup] Creating index ${i}...`);
-    await withRetries(() => prismaTimescale.$executeRawUnsafe(stmt), `CREATE_INDEX_${i}`);
-    console.log(`[rollup] Index ${i} created.`);
+    console.log("[rollup] applying rollups (protected, batched)...");
+    await deleteInBatches(sqlDailyBatch,   "DAILY");
+    await deleteInBatches(sqlWeeklyBatch,  "WEEKLY");
+    await deleteInBatches(sqlMonthlyBatch, "MONTHLY");
+    await deleteInBatches(sqlYearlyBatch,  "YEARLY");
+
+    // Optional terminal retention (delete very old yearly points)
+    if (!Number.isNaN(RETAIN_YEARS) && RETAIN_YEARS > 0) {
+      await deleteInBatches(() => sqlTerminalRetentionBatch(RETAIN_YEARS), "RETENTION");
+    }
+
+    await withRetries(() => prismaTimescale.$executeRawUnsafe(`ANALYZE "PriceHistory"`), "ANALYZE");
+    console.log("[rollup] all rollups completed.");
+  } finally {
+    await prismaTimescale.$executeRawUnsafe(RELEASE_LOCK_SQL).catch(() => {});
   }
-
-  // 2) Upsert rollups
-  console.log("[rollup] Upserting daily rollups...");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(UPSERT_DAILY), "UPSERT_DAILY");
-
-  console.log("[rollup] Upserting 3-day rollups...");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(UPSERT_3D), "UPSERT_3D");
-
-  console.log("[rollup] Upserting monthly rollups...");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(UPSERT_MONTHLY), "UPSERT_MONTHLY");
-
-  console.log("[rollup] Upserting 6-month rollups...");
-  await withRetries(() => prismaTimescale.$executeRawUnsafe(UPSERT_6M), "UPSERT_6M");
-
-  // 3) Prune older tiers AFTER rollups
-  console.log("[rollup] Pruning old data...");
-  for (const [i, stmt] of PRUNE_STATEMENTS.entries()) {
-    console.log(`[rollup] Pruning step ${i}...`);
-    await withRetries(() => prismaTimescale.$executeRawUnsafe(stmt), `PRUNE_${i}`);
-    console.log(`[rollup] Prune step ${i} done.`);
-  }
-
-  console.log("[rollup] done");
 }
 
 export async function timerHandler(_: Timer, context: InvocationContext) {
@@ -232,14 +216,14 @@ export async function timerHandler(_: Timer, context: InvocationContext) {
     await runRollups(context);
   } catch (err: any) {
     context.error("[rollup] FAILED:", err?.message ?? err);
-    throw err; // let Azure retry/alert if configured
+    throw err;
   } finally {
     await prismaTimescale.$disconnect().catch(() => {});
   }
 }
 
-// Run 10 minutes after each 3-hour boundary so it follows your ingest job
+// 02:45 daily (15 minutes before the day's second upsert)
 app.timer("priceHistoryRollup", {
-  schedule: "0 10 */3 * * *", // sec min hour dom mon dow → 00:10, 03:10, 06:10, ...
+  schedule: "0 45 2 * * *",
   handler: timerHandler,
 });

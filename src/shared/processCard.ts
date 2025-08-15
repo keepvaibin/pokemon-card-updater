@@ -6,22 +6,40 @@ import { Prisma as AppPrisma } from "@prisma/app-client";
 import { getAppDb, getTsDb } from "./db";
 
 function buildPriceRows(cards: any[]) {
-  const rows: { cardId: string; time: Date; averageSellPrice: number | null; source: string | null }[] = [];
+  const rows: {
+    cardId: string;
+    time: Date;
+    tcgplayer_normal_market: number | null;
+    tcgplayer_holofoil_market: number | null;
+    tcgplayer_reverse_holofoil_market: number | null;
+    cardmarket_average_sell_price: number | null;
+    no_tcgplayer_prices: boolean; // true if all TCGPlayer markets are null
+  }[] = [];
+
   const now = new Date();
+
   for (const card of cards) {
     if (!card?.id) continue;
-    const avg =
-      card.tcgplayer?.prices?.normal?.market ??
-      card.tcgplayer?.prices?.holofoil?.market ??
-      card.cardmarket?.prices?.trendPrice ??
-      null;
+
+    const normalMarket = card.tcgplayer?.prices?.normal?.market ?? null;
+    const holofoilMarket = card.tcgplayer?.prices?.holofoil?.market ?? null;
+    const reverseHolofoilMarket = card.tcgplayer?.prices?.reverseHolofoil?.market ?? null;
+    const cardmarketAvg = card.cardmarket?.prices?.averageSellPrice ?? null;
+
+    const noTcgplayerPrices =
+      normalMarket == null && holofoilMarket == null && reverseHolofoilMarket == null;
+
     rows.push({
       cardId: card.id,
       time: now,
-      averageSellPrice: avg != null ? Number(avg) : null,
-      source: card.tcgplayer ? "tcgplayer" : card.cardmarket ? "cardmarket" : null,
+      tcgplayer_normal_market: normalMarket != null ? Number(normalMarket) : null,
+      tcgplayer_holofoil_market: holofoilMarket != null ? Number(holofoilMarket) : null,
+      tcgplayer_reverse_holofoil_market: reverseHolofoilMarket != null ? Number(reverseHolofoilMarket) : null,
+      cardmarket_average_sell_price: cardmarketAvg != null ? Number(cardmarketAvg) : null,
+      no_tcgplayer_prices: noTcgplayerPrices
     });
   }
+
   return rows;
 }
 
@@ -192,14 +210,33 @@ export async function processPage(cards: any[], workerId: string): Promise<void>
 
   if (tsDb && priceRows.length) {
     try {
-      await tsDb.priceHistory.createMany({ data: priceRows, skipDuplicates: true });
+      await tsDb.priceHistory.createMany({
+        data: priceRows,
+        skipDuplicates: true
+      });
     } catch {
       for (const r of priceRows) {
         try {
           await tsDb.priceHistory.upsert({
-            where: { cardId_time: { cardId: r.cardId, time: r.time } as any },
-            update: { averageSellPrice: r.averageSellPrice, source: r.source ?? undefined },
-            create: { cardId: r.cardId, time: r.time, averageSellPrice: r.averageSellPrice, source: r.source ?? undefined },
+            where: {
+              cardId_time: { cardId: r.cardId, time: r.time } as any,
+            },
+            update: {
+              tcgplayer_normal_market: r.tcgplayer_normal_market,
+              tcgplayer_holofoil_market: r.tcgplayer_holofoil_market,
+              tcgplayer_reverse_holofoil_market: r.tcgplayer_reverse_holofoil_market,
+              cardmarket_average_sell_price: r.cardmarket_average_sell_price,
+              no_tcgplayer_prices: r.no_tcgplayer_prices,
+            },
+            create: {
+              cardId: r.cardId,
+              time: r.time,
+              tcgplayer_normal_market: r.tcgplayer_normal_market,
+              tcgplayer_holofoil_market: r.tcgplayer_holofoil_market,
+              tcgplayer_reverse_holofoil_market: r.tcgplayer_reverse_holofoil_market,
+              cardmarket_average_sell_price: r.cardmarket_average_sell_price,
+              no_tcgplayer_prices: r.no_tcgplayer_prices,
+            },
           } as any);
         } catch {}
       }
